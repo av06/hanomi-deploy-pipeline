@@ -1,0 +1,16 @@
+# Build artifacts
+dist/
+package/
+*.tar.gz
+*.zip
+
+# Local secrets
+*.pem
+*.key
+.env
+*.env
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

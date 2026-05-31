@@ -1,0 +1,21 @@
+[Unit]
+Description=Hanomi Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hanomi
+Group=hanomi
+WorkingDirectory=/opt/hanomi/backend/current
+EnvironmentFile=-/etc/hanomi/backend.env
+ExecStart=/opt/hanomi/backend/current/bin/backend
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

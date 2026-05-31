@@ -1,0 +1,11 @@
+# Illustrative only. Replace these placeholder URLs with real service repositories
+# before enabling recursive submodule checkout in a runnable deployment repo.
+[submodule "backend"]
+	path = backend
+	url = git@github.com:example-org/hanomi-backend.git
+[submodule "frontend"]
+	path = frontend
+	url = git@github.com:example-org/hanomi-frontend.git
+[submodule "worker"]
+	path = worker
+	url = git@github.com:example-org/hanomi-worker.git

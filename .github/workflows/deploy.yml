@@ -1,0 +1,171 @@
+name: Deploy Hanomi stack
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: hanomi-production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_ID: ${{ github.run_number }}-${{ github.sha }}
+  ARTIFACT_DIR: dist
+
+jobs:
+  build:
+    name: Build service artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout parent repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          # For private submodules, configure a deploy key/token in the repository.
+          # ssh-key: ${{ secrets.SUBMODULE_SSH_KEY }}
+
+      - name: Create artifact directory
+        run: mkdir -p "${ARTIFACT_DIR}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build backend
+        working-directory: backend
+        run: |
+          go test ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../${ARTIFACT_DIR}/backend ./cmd/backend
+
+      - name: Package backend
+        run: |
+          mkdir -p package/backend/bin
+          cp ${ARTIFACT_DIR}/backend package/backend/bin/backend
+          tar -C package/backend -czf ${ARTIFACT_DIR}/backend-${RELEASE_ID}.tar.gz .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint --if-present
+          npm test --if-present
+          npm run build
+
+      - name: Package frontend
+        run: |
+          test -d frontend/.next/standalone || {
+            echo "frontend must use Next.js output: 'standalone' so server.js is available in the release artifact"
+            exit 1
+          }
+          mkdir -p package/frontend
+          cp -R frontend/.next/standalone/* package/frontend/
+          mkdir -p package/frontend/.next
+          cp -R frontend/.next/static package/frontend/.next/static
+          [ -d frontend/public ] && cp -R frontend/public package/frontend/public
+          tar -C package/frontend -czf ${ARTIFACT_DIR}/frontend-${RELEASE_ID}.tar.gz .
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: Test worker
+        working-directory: worker
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -d tests ]; then python -m pytest tests; fi
+
+      - name: Package worker
+        run: |
+          mkdir -p package/worker
+          rsync -a --exclude '.git' worker/ package/worker/
+          cd package/worker
+          zip -r ../../${ARTIFACT_DIR}/worker-${RELEASE_ID}.zip .
+
+      - name: Upload service artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hanomi-artifacts-${{ env.RELEASE_ID }}
+          path: dist/*
+          retention-days: 14
+
+  deploy:
+    name: Deploy to production VMs
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production
+
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Download service artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: hanomi-artifacts-${{ env.RELEASE_ID }}
+          path: dist
+
+      - name: Prepare SSH keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/hanomi_linux_key
+          printf '%s\n' "${{ secrets.WINDOWS_SSH_PRIVATE_KEY }}" > ~/.ssh/hanomi_windows_key
+          chmod 600 ~/.ssh/hanomi_linux_key ~/.ssh/hanomi_windows_key
+          ssh-keyscan -H "${{ secrets.BACKEND_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.FRONTEND_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.WINDOWS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT="dist/backend-${RELEASE_ID}.tar.gz"
+          REMOTE_DIR="/tmp/hanomi/backend/${RELEASE_ID}"
+          ssh -i ~/.ssh/hanomi_linux_key "${{ secrets.LINUX_SSH_USER }}@${{ secrets.BACKEND_HOST }}" "mkdir -p ${REMOTE_DIR}"
+          scp -i ~/.ssh/hanomi_linux_key "$ARTIFACT" scripts/remote/deploy-linux.sh scripts/remote/rollback-linux.sh "${{ secrets.LINUX_SSH_USER }}@${{ secrets.BACKEND_HOST }}:${REMOTE_DIR}/"
+          ssh -i ~/.ssh/hanomi_linux_key "${{ secrets.LINUX_SSH_USER }}@${{ secrets.BACKEND_HOST }}" \
+            "chmod +x ${REMOTE_DIR}/deploy-linux.sh ${REMOTE_DIR}/rollback-linux.sh && sudo ${REMOTE_DIR}/deploy-linux.sh backend ${RELEASE_ID} ${REMOTE_DIR}/backend-${RELEASE_ID}.tar.gz hanomi-backend 'http://127.0.0.1:8080/health'"
+
+      - name: Deploy frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT="dist/frontend-${RELEASE_ID}.tar.gz"
+          REMOTE_DIR="/tmp/hanomi/frontend/${RELEASE_ID}"
+          ssh -i ~/.ssh/hanomi_linux_key "${{ secrets.LINUX_SSH_USER }}@${{ secrets.FRONTEND_HOST }}" "mkdir -p ${REMOTE_DIR}"
+          scp -i ~/.ssh/hanomi_linux_key "$ARTIFACT" scripts/remote/deploy-linux.sh scripts/remote/rollback-linux.sh "${{ secrets.LINUX_SSH_USER }}@${{ secrets.FRONTEND_HOST }}:${REMOTE_DIR}/"
+          ssh -i ~/.ssh/hanomi_linux_key "${{ secrets.LINUX_SSH_USER }}@${{ secrets.FRONTEND_HOST }}" \
+            "chmod +x ${REMOTE_DIR}/deploy-linux.sh ${REMOTE_DIR}/rollback-linux.sh && sudo ${REMOTE_DIR}/deploy-linux.sh frontend ${RELEASE_ID} ${REMOTE_DIR}/frontend-${RELEASE_ID}.tar.gz hanomi-frontend 'http://127.0.0.1:3000/api/health'"
+
+      - name: Deploy worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT="dist/worker-${RELEASE_ID}.zip"
+          REMOTE_DIR='C:/hanomi/worker/incoming/${{ env.RELEASE_ID }}'
+          ssh -i ~/.ssh/hanomi_windows_key "${{ secrets.WINDOWS_SSH_USER }}@${{ secrets.WINDOWS_HOST }}" "powershell -NoProfile -Command New-Item -ItemType Directory -Force -Path '${REMOTE_DIR}'"
+          scp -i ~/.ssh/hanomi_windows_key "$ARTIFACT" scripts/remote/deploy-windows.ps1 scripts/remote/rollback-windows.ps1 "${{ secrets.WINDOWS_SSH_USER }}@${{ secrets.WINDOWS_HOST }}:${REMOTE_DIR}/"
+          ssh -i ~/.ssh/hanomi_windows_key "${{ secrets.WINDOWS_SSH_USER }}@${{ secrets.WINDOWS_HOST }}" \
+            "powershell -NoProfile -ExecutionPolicy Bypass -File '${REMOTE_DIR}/deploy-windows.ps1' -ServiceName worker -ReleaseId '${RELEASE_ID}' -ArtifactPath '${REMOTE_DIR}/worker-${RELEASE_ID}.zip' -TaskName 'HanomiWorker' -HealthUrl 'http://127.0.0.1:9000/health'"

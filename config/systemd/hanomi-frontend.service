@@ -1,0 +1,21 @@
+[Unit]
+Description=Hanomi Frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hanomi
+Group=hanomi
+WorkingDirectory=/opt/hanomi/frontend/current
+EnvironmentFile=-/etc/hanomi/frontend.env
+ExecStart=/usr/bin/node /opt/hanomi/frontend/current/server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
