@@ -27,6 +27,8 @@ hanomi-deploy-pipeline/
 
 > Note: the submodule directories are represented as placeholders in this submission. The CI config is written as if real service submodules exist at these paths. In a real repo, these would be added with `git submodule add <repo-url> backend`, `frontend`, and `worker`.
 
+The GitHub Actions workflow includes a preflight check. In this public assignment repository, it exits successfully after noting that the service directories are placeholders. Once real submodules are attached, the same workflow proceeds through build, package, deploy, health check, and rollback behavior.
+
 Expected service entrypoints:
 
 - `backend/go.mod`, `backend/go.sum`, and `backend/cmd/backend`
